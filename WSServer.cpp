@@ -1,7 +1,7 @@
 #include "WSServer.h"
 
 WSChat::WSServer::WSServer(const std::string& ip, int port)
-	: m_DLLVersion{MAKEWORD(2, 1)},
+	: m_DLLVersion{ MAKEWORD(2, 1) },
 	  m_listenForNewConnection{},
 	  m_handleNewConnection{},
 	  m_users{},
@@ -10,6 +10,9 @@ WSChat::WSServer::WSServer(const std::string& ip, int port)
 	  m_addr { },
 	  m_wsaData {},
 	  m_isUp { false }
+{ }
+
+void WSChat::WSServer::initInput()
 {
 	std::thread inputThread (&WSServer::handleInput, this);
 	inputThread.join();
@@ -18,27 +21,45 @@ WSChat::WSServer::WSServer(const std::string& ip, int port)
 
 void WSChat::WSServer::start()
 {
-	if (startupServer() != WSChat::ErrorCode::NoError)
-		return;
+	if (!m_isUp)
+	{
+		if (startupServer() == WSChat::ErrorCode::NoError)
+		{
+			m_isUp = true;
+			std::cout << "LOG: Server started and ready to accept new connections." << std::endl;
 
-	m_isUp = true;
-	std::cout << "LOG: Server started and ready to accept new connections. \n";
-
-	std::thread handleConnThread(&WSServer::handleNewConnections, this);
-	handleConnThread.detach();
+			std::thread handleConnThread(&WSServer::handleNewConnections, this);
+			handleConnThread.detach();
+		}
+		else
+		{
+			std::cout << "LOG: Server startup failure." << std::endl;
+		}
+	}
+	else
+	{	
+		std::cout << "LOG: Server is already up." << std::endl;
+	}
 }
 
 void WSChat::WSServer::shutDown()
 {
-	shutdown(m_handleNewConnection, SD_SEND);
-	shutdown(m_listenForNewConnection, SD_SEND);
-	closesocket(m_handleNewConnection);
-	closesocket(m_listenForNewConnection);
-	WSACleanup();
+	if (m_isUp)
+	{
+		shutdown(m_handleNewConnection, SD_SEND);
+		shutdown(m_listenForNewConnection, SD_SEND);
+		closesocket(m_handleNewConnection);
+		closesocket(m_listenForNewConnection);
+		WSACleanup();
 
-	m_isUp = false;
+		m_isUp = false;
 
-	std::cout << "LOG: Server is down. \n";
+		std::cout << "LOG: Server is down." << std::endl;
+	}
+	else
+	{
+		std::cout << "LOG: Server is already down." << std::endl;
+	}
 }
 
 
@@ -47,7 +68,7 @@ WSChat::ErrorCode WSChat::WSServer::startupServer()
 	// Загружаем библиотеку winsock
 	if (WSAStartup(m_DLLVersion, &m_wsaData) != 0)
 	{
-		std::cout << "LOG: Error loading winsock.\n";
+		std::cout << "LOG: Error loading winsock." << std::endl;
 		return WSChat::ErrorCode::StartupError;
 	}
 
@@ -56,7 +77,7 @@ WSChat::ErrorCode WSChat::WSServer::startupServer()
 
 	if (ipAddr == INADDR_NONE)
 	{
-		std::cout << "LOG: Wrong IP format.\n";
+		std::cout << "LOG: Wrong IP format." << std::endl;
 		return WSChat::ErrorCode::StartupError;
 	}
 
@@ -87,28 +108,98 @@ void WSChat::WSServer::handleInput()
 		else if (command == "shutdown") {
 			shutDown();
 		}
+		else
+			std::cout << "Usage: start shutdown quit" << std::endl;
 	}
 }
 
 void WSChat::WSServer::handleNewConnections()
 {
 	int addrSize = sizeof(m_addr);
-	char msg[256];
 
 	while (m_isUp == true) 
 	{
+
 		if (m_users.size() < m_maxConnections) 
 		{
 			m_handleNewConnection = accept(m_listenForNewConnection, (SOCKADDR*)&m_addr, &addrSize);
 
 			if (m_handleNewConnection == 0)
-				std::cout << "Error connecting to client.\n";
+				std::cout << "Error connecting to client." << std::endl;
 			else 
 			{
-				recv(m_handleNewConnection, msg, 255, NULL);
-				std::cout << msg;
+				std::thread userThread(&WSServer::authorizeNewClient, this, m_handleNewConnection);
+				userThread.detach();
 			}
+		}
+	}
+}
 
+void WSChat::WSServer::authorizeNewClient(SOCKET newConn)
+{
+	int nicknameLen = 0;
+	std::string nickname;
+
+	// Получаем длину ника и ник
+	recv(newConn, (char*)&nicknameLen, sizeof(int), NULL);
+	nickname.resize(nicknameLen + 1);
+	recv(newConn, (char*)nickname.data(), nicknameLen, NULL);
+	nickname[nicknameLen] = '\0';
+
+	ErrorCode error = ErrorCode::NoError;
+
+	// Проверяем заполнение ника
+	if (nicknameLen == 0)
+		error = ErrorCode::EmptyNickname;
+
+	m_usersMutex.lock();
+
+	// Проверяем уникальность ника
+	for (auto& user : m_users) {
+		if (user.first == nickname)
+			error = ErrorCode::NotUniqueNickname;
+	}
+
+	send(newConn, (char*)&error, sizeof(ErrorCode), NULL);
+
+	if (error == ErrorCode::NoError)
+		m_users.insert({ nickname, newConn });
+
+	m_usersMutex.unlock();
+
+	if (error == ErrorCode::NoError)
+	{
+		handleMessage(nickname);
+	}
+}
+
+void WSChat::WSServer::handleMessage(const std::string& nickname)
+{
+	// Получаем длину сообщения и сообщение
+	size_t msgLen;
+	std::string msg;
+
+	while (true) {
+		recv(m_users.at(nickname), (char*)&msgLen, sizeof(size_t), NULL);
+		msg.resize(msgLen + 1);
+		recv(m_users.at(nickname), (char*)msg.data(), msgLen, NULL);
+		msg[msgLen] = '\0';
+
+		// Если пользователь закрывает подключение, удаляем запись из таблицы
+		if (strcmp(msg.c_str(), "/quit") == 0)
+		{
+			m_usersMutex.lock();
+			m_users.erase(nickname);
+			m_usersMutex.unlock();
+			return;
+		}
+
+		// Отправляем сообщение всем, кроме отправителя
+		for (auto& user : m_users) {
+			if (nickname != user.first) {
+				send(user.second, (char*)&msgLen, sizeof(size_t), NULL);
+				send(user.second, (char*)msg.data(), msgLen, NULL);
+			}
 		}
 	}
 }
