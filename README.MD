@@ -1,0 +1,1 @@
+This is server-side of my simple winsocket chat project. Client-side is being developed and will be published soon.
