@@ -109,6 +109,8 @@ namespace WSChat {
 			else if (command == "shutdown") {
 				shutDown();
 			}
+			else if (command == "quit")
+				continue;
 			else
 				std::cout << "Usage: start shutdown quit" << std::endl;
 		}
